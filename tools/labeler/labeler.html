@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<title>Офлайн-разметчик датасета (YOLO bbox)</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; font-family: Segoe UI, sans-serif; background: #111; color: #eee; }
+  #bar { display: flex; gap: 12px; align-items: center; padding: 10px 14px; background: #1b1b1b; flex-wrap: wrap; }
+  button, label.file { background: #2d6cdf; border: 0; color: #fff; padding: 8px 12px; border-radius: 6px; cursor: pointer; }
+  button.secondary { background: #444; }
+  input[type=text] { background: #222; color: #eee; border: 1px solid #444; border-radius: 6px; padding: 8px 10px; }
+  #status { opacity: .85; }
+  #wrap { display: flex; justify-content: center; padding: 12px; }
+  canvas { max-width: 95vw; max-height: 78vh; background: #000; cursor: crosshair; touch-action: none; }
+  kbd { background: #333; padding: 2px 6px; border-radius: 4px; }
+</style>
+</head>
+<body>
+  <div id="bar">
+    <span>Класс: <input id="className" type="text" value="object" size="16" /></span>
+    <label class="file">1. Выбрать папку с фото
+      <input id="dir" type="file" webkitdirectory directory multiple accept="image/*" hidden />
+    </label>
+    <button id="saveBtn" class="secondary" disabled>2. Скачать labels.zip</button>
+    <span id="status">Выберите папку с фотографиями вашего объекта</span>
+  </div>
+  <div id="bar">
+    <span>ЛКМ — рамка · <kbd>N</kbd>/<kbd>Enter</kbd> — далее · <kbd>B</kbd> — назад · <kbd>X</kbd> — сбросить рамку · <kbd>S</kbd> — пропуск (нет объекта / плохой кадр)</span>
+  </div>
+  <div id="wrap"><canvas id="c"></canvas></div>
+<script>
+// Простой офлайн-инструмент разметки: одна рамка на фото, один класс на весь набор.
+// Ничего не отправляется в интернет - всё происходит в вашем браузере.
+// Если нужно несколько классов - разметьте датасет несколькими проходами
+// (меняя имя класса в поле сверху) в разные подпапки.
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const status = document.getElementById('status');
+const saveBtn = document.getElementById('saveBtn');
+const classNameInput = document.getElementById('className');
+let files = [];
+let idx = 0;
+let img = new Image();
+let box = null; // {x1,y1,x2,y2} в координатах изображения
+let dragging = false;
+let start = null;
+const labels = {}; // имя файла -> yolo-строка или null (пропуск)
+
+function setStatus() {
+  const done = Object.keys(labels).length;
+  status.textContent = files.length
+    ? `${idx+1}/${files.length} · ${files[idx].name} · размечено ${done}`
+    : 'Выберите папку с фотографиями вашего объекта';
+  saveBtn.disabled = done === 0;
+}
+
+function toYolo(b, w, h) {
+  const x1 = Math.min(b.x1,b.x2), x2 = Math.max(b.x1,b.x2);
+  const y1 = Math.min(b.y1,b.y2), y2 = Math.max(b.y1,b.y2);
+  const bw = (x2-x1)/w, bh = (y2-y1)/h;
+  if (bw < 0.01 || bh < 0.01) return null;
+  const cx = ((x1+x2)/2)/w, cy = ((y1+y2)/2)/h;
+  return `0 ${cx.toFixed(6)} ${cy.toFixed(6)} ${bw.toFixed(6)} ${bh.toFixed(6)}`;
+}
+
+function draw() {
+  if (!img.width) return;
+  const maxW = Math.min(window.innerWidth * 0.95, img.width);
+  const maxH = Math.min(window.innerHeight * 0.78, img.height);
+  const scale = Math.min(maxW/img.width, maxH/img.height, 1);
+  canvas.width = Math.round(img.width * scale);
+  canvas.height = Math.round(img.height * scale);
+  canvas._scale = scale;
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  if (box) {
+    const s = scale;
+    const x = Math.min(box.x1, box.x2) * s;
+    const y = Math.min(box.y1, box.y2) * s;
+    const w = Math.abs(box.x2 - box.x1) * s;
+    const h = Math.abs(box.y2 - box.y1) * s;
+    ctx.strokeStyle = '#00ff66';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x, y, w, h);
+  }
+}
+
+function load(i) {
+  if (!files.length) return;
+  idx = Math.max(0, Math.min(i, files.length-1));
+  const f = files[idx];
+  const url = URL.createObjectURL(f);
+  img.onload = () => {
+    box = null;
+    draw();
+    setStatus();
+    URL.revokeObjectURL(url);
+  };
+  img.src = url;
+}
+
+function commit(skip=false) {
+  const name = files[idx].name;
+  if (skip) {
+    labels[name] = null;
+  } else {
+    const line = box ? toYolo(box, img.width, img.height) : null;
+    if (!line) { status.textContent = 'Нарисуйте рамку вокруг объекта (или нажмите S чтобы пропустить кадр)'; return; }
+    labels[name] = line;
+  }
+  if (idx < files.length - 1) load(idx+1);
+  else setStatus();
+}
+
+document.getElementById('dir').addEventListener('change', (e) => {
+  files = [...e.target.files]
+    .filter(f => /\.jpe?g$/i.test(f.name))
+    .sort((a,b) => {
+      const na = parseInt(a.name,10), nb = parseInt(b.name,10);
+      if (!isNaN(na) && !isNaN(nb)) return na-nb;
+      return a.name.localeCompare(b.name);
+    });
+  Object.keys(labels).forEach(k => delete labels[k]);
+  load(0);
+});
+
+function pt(ev) {
+  const r = canvas.getBoundingClientRect();
+  const s = canvas._scale || 1;
+  return {
+    x: (ev.clientX - r.left) / s,
+    y: (ev.clientY - r.top) / s
+  };
+}
+
+canvas.addEventListener('pointerdown', (ev) => {
+  canvas.setPointerCapture(ev.pointerId);
+  dragging = true;
+  start = pt(ev);
+  box = {x1:start.x,y1:start.y,x2:start.x,y2:start.y};
+  draw();
+});
+canvas.addEventListener('pointermove', (ev) => {
+  if (!dragging) return;
+  const p = pt(ev);
+  box.x2 = p.x; box.y2 = p.y;
+  draw();
+});
+canvas.addEventListener('pointerup', () => { dragging = false; });
+
+window.addEventListener('keydown', (ev) => {
+  if (document.activeElement === classNameInput) return; // не мешаем вводу текста
+  if (ev.key === 'n' || ev.key === 'N' || ev.key === 'Enter') { ev.preventDefault(); commit(false); }
+  if (ev.key === 's' || ev.key === 'S') { ev.preventDefault(); commit(true); }
+  if (ev.key === 'b' || ev.key === 'B') { ev.preventDefault(); load(idx-1); }
+  if (ev.key === 'x' || ev.key === 'X') { box = null; draw(); }
+});
+
+saveBtn.addEventListener('click', async () => {
+  const className = (classNameInput.value || 'object').trim() || 'object';
+  const entries = Object.entries(labels).filter(([,v]) => v);
+  const filesOut = [];
+  for (const [name, line] of entries) {
+    const stem = name.replace(/\.[^.]+$/, '');
+    filesOut.push({name: stem + '.txt', data: new TextEncoder().encode(line + '\n')});
+  }
+  const yaml = `nc: 1\nnames: ['${className}']\n`;
+  filesOut.push({name: 'data.yaml.txt', data: new TextEncoder().encode(yaml)});
+  filesOut.push({name: 'README.txt', data: new TextEncoder().encode(
+    `Размечено ${entries.length} файлов, класс "${className}".\n` +
+    `Скопируйте *.txt рядом с соответствующими *.jpg (или в отдельную папку labels/) — см. docs/04-dataset.md.\n`
+  )});
+  const zip = await buildZip(filesOut);
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(zip);
+  a.download = 'labels.zip';
+  a.click();
+});
+
+// маленький ZIP-архиватор (без сжатия, только store)
+async function buildZip(files) {
+  const chunks = [];
+  const central = [];
+  let offset = 0;
+  const enc = new TextEncoder();
+  for (const f of files) {
+    const name = enc.encode(f.name);
+    const data = f.data;
+    const local = new Uint8Array(30 + name.length);
+    const dv = new DataView(local.buffer);
+    dv.setUint32(0, 0x04034b50, true);
+    dv.setUint16(8, 0, true); // stored
+    dv.setUint32(14, 0, true); // crc optional 0
+    dv.setUint32(18, data.length, true);
+    dv.setUint32(22, data.length, true);
+    dv.setUint16(26, name.length, true);
+    local.set(name, 30);
+    chunks.push(local, data);
+    const cen = new Uint8Array(46 + name.length);
+    const cv = new DataView(cen.buffer);
+    cv.setUint32(0, 0x02014b50, true);
+    cv.setUint32(16, 0, true);
+    cv.setUint32(20, data.length, true);
+    cv.setUint32(24, data.length, true);
+    cv.setUint16(28, name.length, true);
+    cv.setUint32(42, offset, true);
+    cen.set(name, 46);
+    central.push(cen);
+    offset += local.length + data.length;
+  }
+  const centralSize = central.reduce((s,c)=>s+c.length,0);
+  const end = new Uint8Array(22);
+  const ev = new DataView(end.buffer);
+  ev.setUint32(0, 0x06054b50, true);
+  ev.setUint16(8, files.length, true);
+  ev.setUint16(10, files.length, true);
+  ev.setUint32(12, centralSize, true);
+  ev.setUint32(16, offset, true);
+  return new Blob([...chunks, ...central, end], {type:'application/zip'});
+}
+
+setStatus();
+</script>
+</body>
+</html>
