@@ -18,7 +18,7 @@
 2. Загружает `my_dataset.zip` через `files.upload()`, находит `data.yaml`, копирует датасет в `/content/my_dataset` и прописывает абсолютные пути.
 3. Обучает `yolov8n` (по умолчанию 100 эпох, 640×640).
 4. Считает метрики на `valid`.
-5. Экспортирует веса в ONNX через [airockchip/ultralytics_yolov8](https://github.com/airockchip/ultralytics_yolov8) с `format: rknn` (без NMS/DFL в графе). Для актуального PyTorch в Colab ноутбук ставит ещё `onnxscript`.
+5. Экспортирует веса в ONNX через [airockchip/ultralytics_yolov8](https://github.com/airockchip/ultralytics_yolov8) с `format: rknn` (без NMS/DFL в графе). В Colab на PyTorch 2.11 ноутбук дополнительно патчит `export_rknn()` (`dynamo=False`), иначе экспорт падает на `onnxscript`.
 6. Ставит [rknn-toolkit2](https://github.com/airockchip/rknn-toolkit2), калибрует на части train-картинок и конвертирует в INT8 RKNN под **RV1103**.
 7. Собирает `labels.txt` из имён классов в `data.yaml` и скачивает вместе с моделью.
 
