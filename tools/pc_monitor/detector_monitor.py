@@ -108,13 +108,13 @@ def ensure_detector(*, force_restart: bool = False) -> None:
         adb("shell", f"killall -9 {BINARY_NAME} rkipc 2>/dev/null", timeout=10)
     else:
         print("Программа не запущена — запускаю...")
-    # out.jpg через symlink на tmpfs — старый бинарник не долбит Flash каждый кадр
+    # nohup + </dev/null: иначе HelloDetector умирает по SIGHUP, когда adb shell закрывается
     cmd = (
         f"killall -9 {BINARY_NAME} rkipc 2>/dev/null; sleep 1; "
         f"cd {REMOTE_DIR} && export LD_LIBRARY_PATH={REMOTE_DIR}/lib && "
         f"rm -f out.jpg && touch /tmp/out.jpg && ln -sf /tmp/out.jpg out.jpg && "
         f"rm -f {REMOTE_LOG} && "
-        f"./{BINARY_NAME} {MODEL_PATH} > {REMOTE_LOG} 2>&1 & "
+        f"nohup ./{BINARY_NAME} {MODEL_PATH} > {REMOTE_LOG} 2>&1 </dev/null & "
         f"sleep 4; "
         f"pidof {BINARY_NAME} 2>/dev/null || ps | grep './{BINARY_NAME}' | grep -v grep"
     )
