@@ -42,7 +42,8 @@ REMOTE_DIR = "/root/detector"
 BINARY_NAME = "HelloDetector"
 MODEL_PATH = "model/yolov8.rknn"
 
-REMOTE_JPG = f"{REMOTE_DIR}/out.jpg"
+REMOTE_JPG = "/tmp/out.jpg"  # HelloDetector пишет кадр сюда (tmpfs); fallback ниже
+REMOTE_JPG_FALLBACKS = [REMOTE_JPG, f"{REMOTE_DIR}/out.jpg"]
 # Лог пишем сюда при автозапуске; также читаем /tmp/detector.log на случай ручного старта
 REMOTE_LOG = f"{REMOTE_DIR}/detector.log"
 REMOTE_LOG_FALLBACKS = [REMOTE_LOG, "/tmp/detector.log"]
@@ -88,27 +89,34 @@ def ensure_adb() -> bool:
 
 
 def _detector_running() -> bool:
-    r = adb("shell", f"pidof {BINARY_NAME} 2>/dev/null || ps | grep {BINARY_NAME} | grep -v grep")
-    out = (r.stdout or "").strip()
-    return bool(out)
+    r = adb("shell", f"pidof {BINARY_NAME} 2>/dev/null")
+    if (r.stdout or "").strip():
+        return True
+    r = adb("shell", f"ps | grep './{BINARY_NAME}' | grep -v grep")
+    return bool((r.stdout or "").strip())
 
 
-def ensure_detector() -> None:
+def ensure_detector(*, force_restart: bool = False) -> None:
     if not ensure_adb():
         print("Плата не видна в ADB. Проверьте кабель/подключение и запустите снова.")
         raise SystemExit(2)
-    if _detector_running():
+    if _detector_running() and not force_restart:
         print(f"Программа уже запущена ({BINARY_NAME})")
         return
-    print("Программа не запущена — запускаю...")
-    # Один shell-вызов: старт в фоне + sleep, иначе nohup часто убивается вместе с adb shell
+    if force_restart:
+        print("Перезапускаю детектор на плате...")
+        adb("shell", f"killall -9 {BINARY_NAME} rkipc 2>/dev/null", timeout=10)
+    else:
+        print("Программа не запущена — запускаю...")
+    # out.jpg через symlink на tmpfs — старый бинарник не долбит Flash каждый кадр
     cmd = (
-        f"killall {BINARY_NAME} rkipc 2>/dev/null; sleep 1; "
+        f"killall -9 {BINARY_NAME} rkipc 2>/dev/null; sleep 1; "
         f"cd {REMOTE_DIR} && export LD_LIBRARY_PATH={REMOTE_DIR}/lib && "
+        f"rm -f out.jpg && touch /tmp/out.jpg && ln -sf /tmp/out.jpg out.jpg && "
         f"rm -f {REMOTE_LOG} && "
-        f"./HelloDetector {MODEL_PATH} > {REMOTE_LOG} 2>&1 & "
+        f"./{BINARY_NAME} {MODEL_PATH} > {REMOTE_LOG} 2>&1 & "
         f"sleep 4; "
-        f"(pidof {BINARY_NAME} || ps | grep {BINARY_NAME} | grep -v grep)"
+        f"pidof {BINARY_NAME} 2>/dev/null || ps | grep './{BINARY_NAME}' | grep -v grep"
     )
     r = adb("shell", cmd, timeout=25)
     print((r.stdout or r.stderr or "").strip())
@@ -118,8 +126,11 @@ def ensure_detector() -> None:
 
 
 def pull_preview() -> bool:
-    r = adb("pull", REMOTE_JPG, str(LOCAL_JPG))
-    return r.returncode == 0 and LOCAL_JPG.exists()
+    for remote in REMOTE_JPG_FALLBACKS:
+        r = adb("pull", remote, str(LOCAL_JPG))
+        if r.returncode == 0 and LOCAL_JPG.exists() and LOCAL_JPG.stat().st_size > 1000:
+            return True
+    return False
 
 
 def read_log_tail(n: int = 250) -> str:
@@ -192,12 +203,20 @@ def main() -> int:
     print("В окне и в консоли: число объектов + координаты каждого (x1,y1,x2,y2)\n")
 
     last_key = ""
+    last_jpg_sig = ""
+    stall_ticks = 0
     win = "detector live"
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(win, 720, 560)
 
     try:
         while True:
+            if not _detector_running():
+                print("Детектор на плате умер — перезапуск...", flush=True)
+                ensure_detector(force_restart=True)
+                stall_ticks = 0
+                last_jpg_sig = ""
+
             log = read_log_tail(250)
             dets = parse_latest_frame(log)
             report = format_report(dets)
@@ -208,6 +227,22 @@ def main() -> int:
 
             frame = None
             if pull_preview():
+                # сигнатура кадра: размер + первые байты — чтобы заметить «залипание»
+                try:
+                    raw = LOCAL_JPG.read_bytes()
+                    sig = f"{len(raw)}:{raw[100:120]!r}"
+                except OSError:
+                    sig = ""
+                if sig and sig == last_jpg_sig:
+                    stall_ticks += 1
+                elif sig:
+                    stall_ticks = 0
+                    last_jpg_sig = sig
+                if stall_ticks >= 25:  # ~3 сек при waitKey(120)
+                    print("out.jpg не меняется — перезапуск детектора...", flush=True)
+                    ensure_detector(force_restart=True)
+                    stall_ticks = 0
+                    last_jpg_sig = ""
                 frame = cv2.imread(str(LOCAL_JPG))
             if frame is None:
                 frame = np.zeros((480, 640, 3), dtype=np.uint8)
@@ -263,7 +298,7 @@ def main() -> int:
                     break
 
             cv2.imshow(win, frame)
-            k = cv2.waitKey(120) & 0xFF
+            k = cv2.waitKey(200) & 0xFF
             if k in (ord("q"), ord("Q"), 27):
                 break
     except KeyboardInterrupt:

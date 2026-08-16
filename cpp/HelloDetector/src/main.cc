@@ -319,7 +319,15 @@ int main(int argc, char **argv)
 
         oled_show_dets(&od_results);
         led_set(ndet > 0);
-        cv::imwrite("out.jpg", camFrame);
+        // Пишем в tmpfs, не на Flash/UBIFS: иначе при ~8 FPS процесс на Mini B
+        // часто «замирает»/умирает, а PC-монитор показывает старый кадр.
+        // Каждое 3-е обновление достаточно для live-просмотра.
+        static int frame_i = 0;
+        if ((frame_i++ % 3) == 0)
+            cv::imwrite("/tmp/out.jpg", camFrame);
+        // совместимость со старым путём PC-монитора / ручным adb pull
+        if ((frame_i % 15) == 1)
+            cv::imwrite("out.jpg", camFrame);
     }
 
     return 0;
