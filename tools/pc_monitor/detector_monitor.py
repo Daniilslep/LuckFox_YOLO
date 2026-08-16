@@ -126,6 +126,11 @@ def ensure_detector(*, force_restart: bool = False) -> None:
 
 
 def pull_preview() -> bool:
+    # Копируем на плате, чтобы не читать JPEG в момент записи (это роняло HelloDetector)
+    adb("shell", "cp -f /tmp/out.jpg /tmp/out_pull.jpg 2>/dev/null || cp -f /root/detector/out.jpg /tmp/out_pull.jpg 2>/dev/null")
+    r = adb("pull", "/tmp/out_pull.jpg", str(LOCAL_JPG))
+    if r.returncode == 0 and LOCAL_JPG.exists() and LOCAL_JPG.stat().st_size > 1000:
+        return True
     for remote in REMOTE_JPG_FALLBACKS:
         r = adb("pull", remote, str(LOCAL_JPG))
         if r.returncode == 0 and LOCAL_JPG.exists() and LOCAL_JPG.stat().st_size > 1000:
@@ -238,7 +243,7 @@ def main() -> int:
                 elif sig:
                     stall_ticks = 0
                     last_jpg_sig = sig
-                if stall_ticks >= 25:  # ~3 сек при waitKey(120)
+                if stall_ticks >= 40:  # ~12 сек при waitKey(300)
                     print("out.jpg не меняется — перезапуск детектора...", flush=True)
                     ensure_detector(force_restart=True)
                     stall_ticks = 0
@@ -298,7 +303,7 @@ def main() -> int:
                     break
 
             cv2.imshow(win, frame)
-            k = cv2.waitKey(200) & 0xFF
+            k = cv2.waitKey(300) & 0xFF
             if k in (ord("q"), ord("Q"), 27):
                 break
     except KeyboardInterrupt:
