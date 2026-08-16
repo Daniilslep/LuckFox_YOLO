@@ -3,15 +3,14 @@
 
 Показывает окно с картинкой последнего кадра камеры (out.jpg с платы), рамками
 и подписями найденных объектов, плюс количество объектов и их координаты в консоли
-и на экране. Никаких дополнительных проводов не нужно - всё идёт через тот же
-USB/ADB, через который вы заливали программу на плату.
+и на экране.
 
-Запуск: см. detector_monitor.cmd (Windows) или просто
-    python detector_monitor.py
-Выход: клавиша Q в открывшемся окне, либо Ctrl+C в консоли.
+Запуск: detector_monitor.cmd (Windows) или python detector_monitor.py
+Выход: Q в окне или Ctrl+C.
 """
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -19,26 +18,40 @@ import sys
 from pathlib import Path
 
 # ============================ НАСТРОЙКИ ============================
-# Если adb есть в PATH - оставьте "adb". Если нет - укажите полный путь
-# к adb.exe (например, из папки, куда распаковали ADB с wiki.luckfox.com).
-ADB = shutil.which("adb") or "adb"
+def _find_adb() -> str:
+    env = os.environ.get("ADB")
+    if env and Path(env).exists():
+        return env
+    which = shutil.which("adb")
+    if which:
+        return which
+    candidates = [
+        r"C:\Program Files\e2eSoft\iVCam\adb\adb.exe",
+        r"C:\Android\platform-tools\adb.exe",
+        r"C:\platform-tools\adb.exe",
+    ]
+    for c in candidates:
+        if Path(c).exists():
+            return c
+    return "adb"
 
-# Папка на плате, куда вы залили HelloDetector (см. docs/06-build-and-deploy.md)
+
+ADB = _find_adb()
+
 REMOTE_DIR = "/root/detector"
 BINARY_NAME = "HelloDetector"
 MODEL_PATH = "model/yolov8.rknn"
 
 REMOTE_JPG = f"{REMOTE_DIR}/out.jpg"
+# Лог пишем сюда при автозапуске; также читаем /tmp/detector.log на случай ручного старта
 REMOTE_LOG = f"{REMOTE_DIR}/detector.log"
+REMOTE_LOG_FALLBACKS = [REMOTE_LOG, "/tmp/detector.log"]
 LOCAL_JPG = Path(__file__).with_name("_preview.jpg")
 
-# Порог уверенности для отображения (полезно, если хочется скрыть слабые детекции
-# без пересборки/перезапуска программы на плате)
 MIN_CONF = 0.50
 # =====================================================================
 
 DET_RE = re.compile(r"cls=\d+\s+p=([\d.]+)\s+box=([\d,-]+)\s+(\S+)")
-DETS_LINE_RE = re.compile(r"^dets=(\d+)\s*$")
 CAM_DETS_RE = re.compile(r"\bcam=.*\bdets=(\d+)")
 
 
@@ -54,9 +67,13 @@ def adb(*args: str, timeout: float = 8.0) -> subprocess.CompletedProcess:
 
 
 def ensure_adb() -> bool:
+    print(f"ADB = {ADB}")
     r = adb("devices")
     for line in (r.stdout or "").splitlines():
-        if line.strip().endswith("device"):
+        if "\tdevice" in line or line.strip().endswith("\tdevice"):
+            return True
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] == "device":
             return True
     print("ADB: устройство не найдено, перезапуск adb...")
     adb("kill-server")
@@ -64,31 +81,38 @@ def ensure_adb() -> bool:
     r = adb("devices")
     print(r.stdout or r.stderr)
     for line in (r.stdout or "").splitlines():
-        if line.strip().endswith("device"):
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] == "device":
             return True
     return False
+
+
+def _detector_running() -> bool:
+    r = adb("shell", f"pidof {BINARY_NAME} 2>/dev/null || ps | grep {BINARY_NAME} | grep -v grep")
+    out = (r.stdout or "").strip()
+    return bool(out)
 
 
 def ensure_detector() -> None:
     if not ensure_adb():
         print("Плата не видна в ADB. Проверьте кабель/подключение и запустите снова.")
         raise SystemExit(2)
-    r = adb("shell", f"pidof {BINARY_NAME}")
-    if r.stdout.strip():
-        print(f"Программа уже запущена, PID={r.stdout.strip()}")
+    if _detector_running():
+        print(f"Программа уже запущена ({BINARY_NAME})")
         return
-    print("Программа не запущена - запускаю...")
+    print("Программа не запущена — запускаю...")
+    # Один shell-вызов: старт в фоне + sleep, иначе nohup часто убивается вместе с adb shell
     cmd = (
-        f"killall {BINARY_NAME} rkipc 2>/dev/null; "
-        f"cd {REMOTE_DIR}; "
-        f"export LD_LIBRARY_PATH={REMOTE_DIR}/lib; "
-        f"rm -f {REMOTE_LOG}; "
-        f"nohup sh -c './{BINARY_NAME} {MODEL_PATH} 2>&1 | tee {REMOTE_LOG}' >/dev/null & "
-        f"sleep 2; pidof {BINARY_NAME}"
+        f"killall {BINARY_NAME} rkipc 2>/dev/null; sleep 1; "
+        f"cd {REMOTE_DIR} && export LD_LIBRARY_PATH={REMOTE_DIR}/lib && "
+        f"rm -f {REMOTE_LOG} && "
+        f"./HelloDetector {MODEL_PATH} > {REMOTE_LOG} 2>&1 & "
+        f"sleep 4; "
+        f"(pidof {BINARY_NAME} || ps | grep {BINARY_NAME} | grep -v grep)"
     )
-    r = adb("shell", cmd, timeout=20)
-    print(r.stdout.strip() or r.stderr.strip())
-    if not (r.stdout or "").strip():
+    r = adb("shell", cmd, timeout=25)
+    print((r.stdout or r.stderr or "").strip())
+    if not _detector_running():
         print(f"Не удалось запустить {BINARY_NAME} на плате.")
         raise SystemExit(3)
 
@@ -98,9 +122,13 @@ def pull_preview() -> bool:
     return r.returncode == 0 and LOCAL_JPG.exists()
 
 
-def read_log_tail(n: int = 200) -> str:
-    r = adb("shell", f"tail -n {n} '{REMOTE_LOG}' 2>/dev/null")
-    return r.stdout or ""
+def read_log_tail(n: int = 250) -> str:
+    for path in REMOTE_LOG_FALLBACKS:
+        r = adb("shell", f"tail -n {n} '{path}' 2>/dev/null")
+        text = r.stdout or ""
+        if text.strip():
+            return text
+    return ""
 
 
 def _det_from_match(m: re.Match) -> dict | None:
@@ -111,49 +139,35 @@ def _det_from_match(m: re.Match) -> dict | None:
 
 
 def parse_latest_frame(log: str) -> list[dict]:
-    """Детекции из последнего завершённого кадра (блок dets= ... cam=)."""
-    lines = log.splitlines()
+    """Детекции из последнего кадра.
 
+    Формат HelloDetector:
+        cls=0 p=0.87 box=x1,y1,x2,y2 name
+        ...
+        cam=0.01 infer=0.12 fps=8.3 dets=1
+    """
+    lines = log.splitlines()
     last_cam = -1
     for i, line in enumerate(lines):
         if CAM_DETS_RE.search(line):
             last_cam = i
     if last_cam < 0:
-        last_dets = -1
-        for i, line in enumerate(lines):
-            if DETS_LINE_RE.match(line.strip()):
-                last_dets = i
-        if last_dets < 0:
-            return []
-        dets: list[dict] = []
-        for line in lines[last_dets + 1:]:
-            s = line.strip()
-            if s.startswith("cam=") or DETS_LINE_RE.match(s) or s.startswith("validCount"):
-                break
-            m = DET_RE.search(s)
-            if m:
-                d = _det_from_match(m)
-                if d:
-                    dets.append(d)
-        return dets
+        return []
 
-    last_dets = -1
+    # границы блока: после предыдущего cam= ... до текущего cam=
+    prev_cam = -1
     for i in range(last_cam - 1, -1, -1):
-        s = lines[i].strip()
-        if DETS_LINE_RE.match(s):
-            last_dets = i
-            break
-        if CAM_DETS_RE.search(s):
+        if CAM_DETS_RE.search(lines[i]):
+            prev_cam = i
             break
 
-    dets = []
-    if last_dets >= 0:
-        for line in lines[last_dets + 1: last_cam]:
-            m = DET_RE.search(line.strip())
-            if m:
-                d = _det_from_match(m)
-                if d:
-                    dets.append(d)
+    dets: list[dict] = []
+    for line in lines[prev_cam + 1 : last_cam]:
+        m = DET_RE.search(line.strip())
+        if m:
+            d = _det_from_match(m)
+            if d:
+                dets.append(d)
     return dets
 
 
@@ -184,7 +198,7 @@ def main() -> int:
 
     try:
         while True:
-            log = read_log_tail(200)
+            log = read_log_tail(250)
             dets = parse_latest_frame(log)
             report = format_report(dets)
             if report != last_key:
@@ -207,9 +221,10 @@ def main() -> int:
                 if len(parts) != 4:
                     continue
                 try:
-                    x1, y1, _x2, _y2 = (int(p) for p in parts)
+                    x1, y1, x2, y2 = (int(p) for p in parts)
                 except ValueError:
                     continue
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                 label = f"{d['name']} {d['p']:.2f}"
                 ty = max(y1 - 8, 18)
                 (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
@@ -233,7 +248,10 @@ def main() -> int:
             for i, d in enumerate(dets, 1):
                 parts = d["box"].split(",")
                 if len(parts) == 4:
-                    line = f"#{i} {d['name']} p={d['p']:.2f}  x1={parts[0]} y1={parts[1]} x2={parts[2]} y2={parts[3]}"
+                    line = (
+                        f"#{i} {d['name']} p={d['p']:.2f}  "
+                        f"x1={parts[0]} y1={parts[1]} x2={parts[2]} y2={parts[3]}"
+                    )
                 else:
                     line = f"#{i} {d['name']} p={d['p']:.2f}  box={d['box']}"
                 cv2.putText(

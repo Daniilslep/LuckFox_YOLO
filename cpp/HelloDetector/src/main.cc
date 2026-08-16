@@ -223,6 +223,10 @@ static int run_on_frame(rknn_app_context_t *ctx, cv::Mat &bgr_frame, cv::Mat &in
 
 int main(int argc, char **argv)
 {
+    // Построчный вывод в лог (иначе при запуске через tee/nohup PC-монитор
+    // долго не видит детекции — stdout полностью буферизуется).
+    setvbuf(stdout, nullptr, _IOLBF, 0);
+
     if (argc != 2 && argc != 3)
     {
         printf("%s <model_path> [image.jpg]\n", argv[0]);
