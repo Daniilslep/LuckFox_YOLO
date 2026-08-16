@@ -48,16 +48,23 @@ adb shell chmod +x /root/detector/HelloDetector
 adb shell
 ```
 
-Внутри плату:
+Внутри платы:
 
 ```bash
 killall rkipc
 cd /root/detector
 export LD_LIBRARY_PATH=/root/detector/lib
-./HelloDetector model/yolov8.rknn
+# nohup важен: без него процесс часто умирает сразу после выхода из adb shell
+nohup ./HelloDetector model/yolov8.rknn > detector.log 2>&1 </dev/null &
 ```
 
-Если всё хорошо, увидите в консоли что-то похожое на:
+Либо одной командой с компьютера:
+
+```powershell
+adb shell "killall rkipc HelloDetector 2>/dev/null; cd /root/detector; export LD_LIBRARY_PATH=/root/detector/lib; nohup ./HelloDetector model/yolov8.rknn > detector.log 2>&1 </dev/null &"
+```
+
+Если всё хорошо, в `detector.log` будет что-то похожее на:
 
 ```text
 opening camera 11...
